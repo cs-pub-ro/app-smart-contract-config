@@ -35,6 +35,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include <sodium.h>
+
 #define DEFAULT_LISTEN_PORT 12345
 
 /* "shortcut" for struct sockaddr structure */
@@ -95,7 +97,7 @@ static int tcp_create_listener(unsigned short port, int backlog)
  * address format IP_address:port (e.g. 192.168.0.1:22).
  */
 
-static int get_peer_address(int sockfd, char *buf, size_t len)
+static int get_peer_address(int sockfd, char *buf, size_t __unused len)
 {
 	struct sockaddr_in addr;
 	socklen_t addrlen = sizeof(struct sockaddr_in);
@@ -109,25 +111,35 @@ static int get_peer_address(int sockfd, char *buf, size_t len)
 }
 
 /*
- * Process command filename to result.
+ * Process command filename to result of size rlen.
  */
 
-static void process(const char *command_filename, char *result)
+static void process(const char *command_filename, char *result, size_t rlen)
 {
 	FILE *f;
 	char buffer[256];
 	enum {
 		OP_NONE = 0,
 		OP_ADD = 1,
-		OP_SUB = 2
+		OP_SUB = 2,
+		OP_HASH_GENERIC = 3,
+		OP_HASH_SHA256 = 4,
+		OP_HASH_SHA512 = 5,
+		OP_EC_MULTIPLY = 6,
+		OP_CORE_SCALAR_MULTIPLY = 7,
+		OP_CORE_SCALAR_INVERT = 8,
 	} op = OP_NONE;
 	unsigned int num1, num2, res;
 
 	f = fopen(command_filename, "rt");
 	if (f == NULL) {
 		printf("Error opening file %s\n", command_filename);
+		sprintf(result, "No such file %s", command_filename);
 		return;
 	}
+
+	/* Initialize result. */
+	result[0] = '\0';
 
 	/* Read operation. */
 	fgets(buffer, 256, f);
@@ -139,33 +151,101 @@ static void process(const char *command_filename, char *result)
 		printf("Operation: subtraction\n");
 		op = OP_SUB;
 	}
+	else if (strncmp(buffer, "hash_generic", 12) == 0) {
+		printf("Operation: hash generic\n");
+		op = OP_HASH_GENERIC;
+	}
+	else if (strncmp(buffer, "hash_sha256", 11) == 0) {
+		printf("Operation: hash sha256\n");
+		op = OP_HASH_SHA256;
+	}
+	else if (strncmp(buffer, "hash_sha512", 11) == 0) {
+		printf("Operation: hash sha512\n");
+		op = OP_HASH_SHA512;
+	}
+	else if (strncmp(buffer, "ec_multiply", 11) == 0) {
+		printf("Operation: ec_multiply\n");
+		op = OP_EC_MULTIPLY;
+	}
+	else if (strncmp(buffer, "scalar_multiply", 15) == 0) {
+		printf("Operation: scalar multiply\n");
+		op = OP_CORE_SCALAR_MULTIPLY;
+	}
+	else if (strncmp(buffer, "scalar_invert", 13) == 0) {
+		printf("Operation: scalar invert\n");
+		op = OP_CORE_SCALAR_INVERT;
+	}
+
+	if (op == OP_ADD || op == OP_SUB) {
+		/* Read 1st number. */
+		fgets(buffer, 256, f);
+		num1 = atoi(buffer);
+
+		/* Read 2nd number. */
+		fgets(buffer, 256, f);
+		num2 = atoi(buffer);
+
+		/* Compute result. */
+		switch (op) {
+		case OP_ADD:
+			res = num1 + num2;
+			break;
+		case OP_SUB:
+			res = num1 - num2;
+			break;
+		default:
+			break;
+		}
+		sprintf(result, "%d", res);
+	}
+	else if (op == OP_HASH_GENERIC || op == OP_HASH_SHA256 || op == OP_HASH_SHA512) {
+		/* Read input message. */
+		fgets(buffer, 256, f);
+		if (buffer[strlen(buffer)-1] == '\n')
+			buffer[strlen(buffer)-1] = '\0';
+
+		/* Compute result. */
+		if (op == OP_HASH_GENERIC) {
+			unsigned char hash[crypto_generichash_BYTES];
+			crypto_generichash(hash, sizeof(hash), (unsigned char *) buffer, strlen(buffer), NULL, 0);
+			sodium_bin2hex(result, rlen, hash, sizeof(hash));
+		}
+		else if (op == OP_HASH_SHA256) {
+			unsigned char hash[crypto_hash_sha256_BYTES];
+			crypto_hash_sha256(hash, (unsigned char *) buffer, strlen(buffer));
+			sodium_bin2hex(result, rlen, hash, sizeof(hash));
+		}
+		else if (op == OP_HASH_SHA512) {
+			unsigned char hash[crypto_hash_sha512_BYTES];
+			crypto_hash_sha512(hash, (unsigned char *) buffer, strlen(buffer));
+			sodium_bin2hex(result, rlen, hash, sizeof(hash));
+		}
+	}
+	else if (op == OP_EC_MULTIPLY || op == OP_CORE_SCALAR_MULTIPLY || op == OP_CORE_SCALAR_INVERT) {
+		/* Read input message. A 32 bytes hex-encoded scalar */
+		char input[crypto_core_ed25519_SCALARBYTES*2];
+		fgets(input, crypto_core_ed25519_SCALARBYTES*2, f);
+
+		unsigned char s[crypto_core_ed25519_SCALARBYTES];
+
+		sodium_hex2bin(s, crypto_core_ed25519_SCALARBYTES,
+				input, crypto_core_ed25519_SCALARBYTES*2,
+				NULL, NULL, NULL);
+
+		unsigned char r[crypto_core_ed25519_BYTES];
+		if (op == OP_EC_MULTIPLY)
+			crypto_scalarmult_ed25519_base_noclamp(r, s);
+		else if (op == OP_CORE_SCALAR_MULTIPLY)
+			crypto_core_ed25519_scalar_mul(r, s, s);
+		else if (op == OP_CORE_SCALAR_INVERT)
+			crypto_core_ed25519_scalar_invert(r, s);
+
+		sodium_bin2hex(result, rlen, r, sizeof(r));
+	}
 	else {
-		/* Initialize result. */
-		result[0] = '\0';
-		return;
+		printf("Unknown operation (%s)", buffer);
+		sprintf(result, "Unknown operation (%s)", buffer);
 	}
-
-	/* Read 1st number. */
-	fgets(buffer, 256, f);
-	num1 = atoi(buffer);
-
-	/* Read 2nd number. */
-	fgets(buffer, 256, f);
-	num2 = atoi(buffer);
-
-	/* Compute result. */
-	switch (op) {
-	case OP_ADD:
-		res = num1 + num2;
-		break;
-	case OP_SUB:
-		res = num1 - num2;
-		break;
-	default:
-		break;
-	}
-
-	sprintf(result, "%d", res);
 
 	fclose(f);
 }
@@ -173,7 +253,7 @@ static void process(const char *command_filename, char *result)
 int main(int argc, char *argv[])
 {
 	int srv, client;
-	ssize_t n;
+	int rc;
 	unsigned short listen_port = DEFAULT_LISTEN_PORT;
 	char addrname[128];
 	char command_filename[256], result[256];
@@ -183,12 +263,21 @@ int main(int argc, char *argv[])
 		listen_port = atoi(argv[1]);
 	}
 
+	/* Initialize libsodium. */
+	rc = sodium_init();
+	if (rc < 0) {
+		printf("Error initializing sodium.\n");
+		return -1;
+	}
+
 	srv = tcp_create_listener(listen_port, 1);
 	if (srv < 0)
 		return -1;
 
 	printf("Listening on port %hu...\n", listen_port);
 	while (1) {
+		ssize_t n;
+
 		client = accept(srv, NULL, 0);
 		DIE(client < 0, "accept");
 
@@ -196,19 +285,34 @@ int main(int argc, char *argv[])
 		printf("Received connection from %s\n", addrname);
 
 		/* Read command filename. */
-		read(client, &command_filename, sizeof(command_filename));
-		if (command_filename[strlen(command_filename)-1] == '\n')
-			command_filename[strlen(command_filename)-1] = '\0';
+		n = read(client, &command_filename, sizeof(command_filename)-1);
+		if (n < 0) {
+			printf("Error reading from socket.\n");
+			goto close;
+		}
+		if (n == 0) {
+			printf("Connection closed.\n");
+			goto close;
+		}
+
+		/*
+		 * Add NUL terminator to have a valid string.
+		 * Remove trailing newline if it's the case.
+		 */
+		command_filename[n] = '\0';
+		if (command_filename[n-1] == '\n')
+			command_filename[n-1] = '\0';
 		printf("Received: %s\n", command_filename);
 
 		/* Process command filename. */
-		process(command_filename, result);
+		process(command_filename, result, 256);
 
 		/* Send output. */
 		n = write(client, &result, strlen(result));
 		DIE(n < 0, "write");
 		printf("Sent: %s\n", result);
 
+close:
 		/* Close connection */
 		close(client);
 	}

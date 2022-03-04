@@ -3,6 +3,7 @@ menuconfig APPSMARTCONTRACTSIMPLE_DEPENDENCIES
 	default y
 	select PLAT_KVM
 	select LIBNEWLIBC
+	select LIBSODIUM
 	select LIBLWIP
 	select LIBUKLIBPARARM
 	select LIBUKARGPARSE
