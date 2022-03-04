@@ -126,6 +126,8 @@ static void process(const char *command_filename, char *result, size_t rlen)
 		OP_HASH_SHA256 = 4,
 		OP_HASH_SHA512 = 5,
 		OP_EC_MULTIPLY = 6,
+		OP_CORE_SCALAR_MULTIPLY = 7,
+		OP_CORE_SCALAR_INVERT = 8,
 	} op = OP_NONE;
 	unsigned int num1, num2, res;
 
@@ -164,6 +166,14 @@ static void process(const char *command_filename, char *result, size_t rlen)
 	else if (strncmp(buffer, "ec_multiply", 11) == 0) {
 		printf("Operation: ec_multiply\n");
 		op = OP_EC_MULTIPLY;
+	}
+	else if (strncmp(buffer, "scalar_multiply", 15) == 0) {
+		printf("Operation: scalar multiply\n");
+		op = OP_CORE_SCALAR_MULTIPLY;
+	}
+	else if (strncmp(buffer, "scalar_invert", 13) == 0) {
+		printf("Operation: scalar invert\n");
+		op = OP_CORE_SCALAR_INVERT;
 	}
 
 	if (op == OP_ADD || op == OP_SUB) {
@@ -211,7 +221,7 @@ static void process(const char *command_filename, char *result, size_t rlen)
 			sodium_bin2hex(result, rlen, hash, sizeof(hash));
 		}
 	}
-	else if (op == OP_EC_MULTIPLY) {
+	else if (op == OP_EC_MULTIPLY || op == OP_CORE_SCALAR_MULTIPLY || op == OP_CORE_SCALAR_INVERT) {
 		/* Read input message. A 32 bytes hex-encoded scalar */
 		char input[crypto_core_ed25519_SCALARBYTES*2];
 		fgets(input, crypto_core_ed25519_SCALARBYTES*2, f);
@@ -223,7 +233,12 @@ static void process(const char *command_filename, char *result, size_t rlen)
 				NULL, NULL, NULL);
 
 		unsigned char r[crypto_core_ed25519_BYTES];
-		crypto_scalarmult_ed25519_base_noclamp(r, s);
+		if (op == OP_EC_MULTIPLY)
+			crypto_scalarmult_ed25519_base_noclamp(r, s);
+		else if (op == OP_CORE_SCALAR_MULTIPLY)
+			crypto_core_ed25519_scalar_mul(r, s, s);
+		else if (op == OP_CORE_SCALAR_INVERT)
+			crypto_core_ed25519_scalar_invert(r, s);
 
 		sodium_bin2hex(result, rlen, r, sizeof(r));
 	}
